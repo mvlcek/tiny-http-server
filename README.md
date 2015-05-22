@@ -1,7 +1,10 @@
 # tiny-http-server
-Single-class Java HTTP server
+
+A single-class single-threaded Java HTTP server that can be used for serving dynamic content in a Java application.
 
 ## Example
+
+Here is a HelloWorld example:
 
 ```java
   HttpServer server = new HttpServer(8080);
@@ -15,4 +18,5 @@ Single-class Java HTTP server
       pw.flush();
     }
   });
+  server.start();
 ```
