@@ -14,7 +14,7 @@ Here is a HelloWorld example:
       String name = request.getParameter("name");
       response.setContentType("text/html; charset=UTF-8");
       PrintWriter pw = new PrintWriter(new OutputStreamWriter(response.getOutputStream(), "UTF-8"));
-      pw.println("<html><body><h1>Hello " + (name != null ? name : "guest") + "!</h1></body></html>");
+      pw.println("<html><body><h1>Hello " + (name != null ? name : "World") + "!</h1></body></html>");
       pw.flush();
     }
   });

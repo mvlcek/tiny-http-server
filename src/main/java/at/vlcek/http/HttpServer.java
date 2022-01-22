@@ -18,18 +18,40 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.concurrent.Executor;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Pattern;
+
+import javax.net.ssl.SSLServerSocketFactory;
 
 public class HttpServer {
 
    private final int port;
 
-   private boolean running = false;
+   private final boolean secure;
+
+   private final AtomicBoolean running = new AtomicBoolean(false);
 
    private final List<HandlerMapping> mappings = new ArrayList<HttpServer.HandlerMapping>();
 
+   private final Executor executor;
+
    public HttpServer(final int port) {
+      this(port, false, null);
+   }
+
+   public HttpServer(final int port, final boolean secure) {
+      this(port, secure, null);
+   }
+
+   public HttpServer(final int port, final Executor executor) {
+      this(port, false, executor);
+   }
+
+   public HttpServer(final int port, final boolean secure, final Executor executor) {
       this.port = port;
+      this.secure = secure;
+      this.executor = executor;
    }
 
    public HttpServer addHandler(final HttpHandler handler) {
@@ -43,64 +65,82 @@ public class HttpServer {
    }
 
    public void start() {
-      ServerSocket s = null;
-      try {
-         s = new ServerSocket(this.port);
+      if (this.running.compareAndSet(false, true)) {
+         new Thread(this::run).start();
+      }
+   }
+
+   private void run() {
+      try (ServerSocket s = this.newServerSocket()) {
          s.setSoTimeout(1000);
-         this.running = true;
-         while (this.running) {
+         while (this.running.get() && !Thread.currentThread().isInterrupted()) {
             try {
                final Socket remote = s.accept();
-               final BufferedReader in = new BufferedReader(new InputStreamReader(remote.getInputStream()));
-               String line = in.readLine();
-               final String parts[] = line.split("\\s+");
-               final String method = parts[0];
-               String url = parts[1];
-               final int qpos = url.indexOf('?');
-               final Map<String, String[]> parameters;
-               if (qpos >= 0) {
-                  parameters = this.getParameters(url.substring(qpos + 1));
-                  url = url.substring(0, qpos);
+               if (this.executor != null) {
+                  this.executor.execute(() -> this.handle(remote));
                } else {
-                  parameters = new HashMap<String, String[]>();
+                  HttpServer.this.handle(remote);
                }
-               final Map<String, String[]> headers = new HashMap<String, String[]>();
-               while (!("".equals(line = in.readLine()))) {
-                  final int pos = line.indexOf(':');
-                  if (pos > 0) {
-                     final String name = line.substring(0, pos).trim();
-                     final String value = line.substring(pos + 1).trim();
-                     headers.put(name, this.addString(headers.get(name), value));
-                  }
-               }
-               final HttpRequest request = new HttpRequest(method, url, parameters, headers, remote.getInputStream());
-               final HttpResponse response = new HttpResponse(remote.getOutputStream());
-               final HttpHandler handler = this.getHandler(url);
-               if (handler != null) {
-                  handler.handle(request, response);
-               }
-               response.writeHeadersIfNotWritten();
-               remote.getOutputStream().flush();
-               remote.close();
             } catch (final SocketTimeoutException e) {
                // ignore
-            } catch (final Exception e) {
-               this.logError(e.getMessage());
             }
          }
       } catch (final Exception e) {
          this.logError(e.getMessage());
-      } finally {
-         try {
-            s.close();
-         } catch (final Exception e) {
-            /* ignore */
+      }
+   }
+
+   protected ServerSocket newServerSocket() throws IOException {
+      if (this.secure) {
+         final SSLServerSocketFactory factory = (SSLServerSocketFactory) SSLServerSocketFactory.getDefault();
+         return factory.createServerSocket(this.port);
+      } else {
+         return new ServerSocket(this.port);
+      }
+   }
+
+   protected void handle(final Socket remote) {
+      try (BufferedReader in = new BufferedReader(new InputStreamReader(remote.getInputStream()))) {
+         String line = in.readLine();
+         if (line == null) {
+            throw new RuntimeException("No HTTP header!");
          }
+         final String parts[] = line.split("\\s+");
+         final String method = parts[0];
+         String url = parts[1];
+         final int qpos = url.indexOf('?');
+         final Map<String, String[]> parameters;
+         if (qpos >= 0) {
+            parameters = this.getParameters(url.substring(qpos + 1));
+            url = url.substring(0, qpos);
+         } else {
+            parameters = new HashMap<String, String[]>();
+         }
+         final Map<String, String[]> headers = new HashMap<String, String[]>();
+         while ((line = in.readLine()) != null && !("".equals(line))) {
+            final int pos = line.indexOf(':');
+            if (pos > 0) {
+               final String name = line.substring(0, pos).trim();
+               final String value = line.substring(pos + 1).trim();
+               headers.put(name, this.addString(headers.get(name), value));
+            }
+         }
+         final HttpRequest request = new HttpRequest(method, url, parameters, headers, remote.getInputStream());
+         final HttpResponse response = new HttpResponse(remote.getOutputStream());
+         final HttpHandler handler = this.getHandler(url);
+         if (handler != null) {
+
+            handler.handle(request, response);
+         }
+         remote.getOutputStream().flush();
+         remote.close();
+      } catch (final Exception e) {
+         this.logError(e.getMessage());
       }
    }
 
    public void stop() {
-      this.running = false;
+      this.running.set(false);
    }
 
    protected void logError(final String message) {
@@ -113,17 +153,16 @@ public class HttpServer {
          newValues[values.length] = value;
          return newValues;
       } else {
-         return new String[] {value};
+         return new String[] { value };
       }
    }
 
    private Map<String, String[]> getParameters(final String s) throws UnsupportedEncodingException {
       final Map<String, String[]> parameters = new HashMap<String, String[]>();
-      final String[] params = s.split("&");
-      for (final String param : params) {
+      for (final String param : s.split("&")) {
          final int pos = param.indexOf('=');
          if (pos >= 0) {
-            final String name = param.substring(0, pos);
+            final String name = URLDecoder.decode(param.substring(0, pos), "UTF-8");
             final String value = URLDecoder.decode(param.substring(pos + 1), "UTF-8");
             parameters.put(name, this.addString(parameters.get(name), value));
          }
@@ -224,11 +263,11 @@ public class HttpServer {
       }
 
       public void setContentType(final String contentType) {
-         this.setHeader("Content-Type:", contentType);
+         this.setHeader("Content-Type", contentType);
       }
 
       public void setHeader(final String name, final String value) {
-         this.headers.put(name, new String[] {value});
+         this.headers.put(name, new String[] { value });
       }
 
       public void addHeader(final String name, final String value) {
@@ -238,7 +277,7 @@ public class HttpServer {
             newHeaders[oldHeaders.length] = value;
             this.headers.put(name, newHeaders);
          } else {
-            this.headers.put(name, new String[] {value});
+            this.headers.put(name, new String[] { value });
          }
       }
 
@@ -293,7 +332,7 @@ public class HttpServer {
 
    public interface HttpHandler {
 
-      public void handle(final HttpRequest request, final HttpResponse response);
+      public void handle(final HttpRequest request, final HttpResponse response) throws Exception;
 
    }
 
